@@ -1,0 +1,829 @@
+---
+title: "Project Models"
+author: ""
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+
+
+\clearpage
+
+
+```{r,include=FALSE}
+library(pacman)
+p_load(tictoc, tidyverse, data.table, tidymodels, yardstick, janitor, naniar, discrim, gmodels, knitr)
+
+library(doParallel)
+registerDoParallel(cores = 12)
+```
+
+
+```{r,include=FALSE}
+tic()
+data <- 
+  fread("C:/Users/accepted_2007_to_2018Q4.csv", 
+              nThread = 12, na.strings = "")   
+data
+toc()
+
+# use na.strings = "" when importing the data having NULL Value
+```
+
+
+```{r,include=FALSE}
+# subset the data for the years 2012-2014
+club <- data %>%
+  filter(str_detect(issue_d, '2012|2013|2014'))
+
+club
+```
+
+
+```{r,include=FALSE}
+# calculate the proportion of missing value for each variables and select which rate > 0.5
+var_na <- club %>% 
+  map_df(~ sum(is.na(.))/length(.)) %>% 
+  select_if(~ . > 0.5) %>%
+  names()
+
+var_na
+```
+
+
+```{r,include=FALSE}
+# select character variables and convert them to factor variables
+#club %>% 
+  #select_if(is.character) %>% 
+  #map_df(~ as.factor(.))
+
+
+club_df <- club %>%
+  select(!one_of(var_na)) %>%                                # remove most missing value variables
+  select(-id, -issue_d, -url, -zip_code, -policy_code, -application_type, -title, -emp_title, 
+         -earliest_cr_line, -last_credit_pull_d, -verification_status, -last_pymnt_d, -addr_state, 
+         -emp_length, -purpose) %>% 
+  mutate_if(is.character, as.factor) %>%                   # convert character vars to factor vars
+  mutate(loan_status_level = ifelse(loan_status == "Fully Paid", 1,  0)) %>%      # classification
+  mutate(loan_status_level = as.factor(loan_status_level))
+
+head(club_df)
+```
+
+
+```{r,include=FALSE}
+# sample 10% of data set
+set.seed(999)
+club_samp <- club_df %>% 
+  slice_sample(n = 0.1*nrow(club))
+
+head(club_samp)
+```
+
+
+```{r,include=FALSE}
+#summarize the y-variable
+CrossTable(club_samp$loan_status_level, prop.chisq = FALSE)
+```
+
+
+```{r,include=FALSE}
+# split the training and testing dataset
+set.seed(999)
+samp_split <- club_samp %>% 
+  initial_split(prop = 0.75)
+
+samp_split
+```
+
+
+```{r,include=FALSE}
+samp_recipe <- training(samp_split) %>% 
+  recipe(loan_status_level ~ .) %>% 
+  step_rm(loan_status) %>%
+  step_nzv(all_predictors()) %>%
+  step_knnimpute(all_predictors()) %>%
+  prep()
+
+summary(samp_recipe)
+
+tidy(samp_recipe)
+```
+
+
+```{r,include=FALSE}
+samp_testing <- samp_recipe %>%
+  bake(testing(samp_split))
+
+samp_testing
+```
+
+
+```{r,include=FALSE}
+samp_training <- juice(samp_recipe)
+
+samp_training
+```
+
+
+
+## Model 0: Null Model
+
+
+### Setup the Model
+
+
+```{r}
+mod_null <- null_model () %>% 
+  set_engine("parsnip") %>%
+  set_mode("classification") %>%
+  fit(loan_status_level ~ ., data = samp_training)
+
+mod_null
+```
+
+
+### Evaluating Model Performance
+
+
+```{r}
+# prediction on testing data set
+pred_null <- mod_null %>%
+  predict(samp_testing) %>%
+  bind_cols(samp_testing)
+
+pred_null %>% 
+  conf_mat(truth = loan_status_level, estimate = .pred_class)
+
+pred_null %>% 
+  metrics(truth = loan_status_level, estimate = .pred_class)
+```
+
+
+```{r out.width="80%",fig.align='center'}
+# plot
+plot_null <- mod_null %>% 
+  predict(samp_testing, type = "prob") %>% 
+  bind_cols(samp_testing)
+
+plot_null %>% 
+  roc_auc(loan_status_level, .pred_0)
+
+plot_null %>% 
+  roc_curve(loan_status_level, .pred_1) %>% 
+  autoplot()
+```
+
+
+
+
+## Model 1: kNN
+
+
+### Data Clean up for kNN 
+
+
+```{r}
+# filter numeric variables for kNN
+var_num <- club_samp %>% 
+  select_if(is.numeric) %>%
+  names()
+
+samp_recipe_knn <- training(samp_split) %>% 
+  select(loan_status_level, one_of(var_num)) %>% 
+  recipe(loan_status_level ~ .) %>%
+  step_nzv(all_predictors()) %>%
+  step_knnimpute(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  prep()
+
+summary(samp_recipe_knn)
+
+tidy(samp_recipe_knn)
+```
+
+
+```{r}
+samp_testing_knn <- samp_recipe_knn %>% 
+  bake(testing(samp_split))
+
+samp_testing_knn
+```
+
+
+```{r}
+samp_training_knn <- juice(samp_recipe_knn)
+
+samp_training_knn
+```
+
+
+### Setup the Model
+
+
+```{r}
+mod_knn <- nearest_neighbor(neighbors = 13) %>% 
+  set_engine("kknn") %>% 
+  set_mode("classification") %>% 
+  fit(loan_status_level ~ ., data = samp_training_knn)
+
+mod_knn
+```
+
+
+### Evaluating Model Performance
+
+
+```{r}
+# prediction on testing data set
+pred_knn <- mod_knn %>% 
+  predict(samp_testing_knn) %>% 
+  bind_cols(samp_testing_knn)
+
+pred_knn %>% 
+  conf_mat(truth = loan_status_level, estimate = .pred_class)
+
+pred_knn %>% 
+  metrics(truth = loan_status_level, estimate = .pred_class)
+```
+
+
+```{r out.width="80%",fig.align='center'}
+# plot
+plot_knn <- mod_knn %>% 
+  predict(samp_testing_knn, type = "prob") %>% 
+  bind_cols(samp_testing_knn)
+
+plot_knn %>% 
+  roc_auc(loan_status_level, .pred_0)
+
+plot_knn %>% 
+  roc_curve(loan_status_level, .pred_0) %>% 
+  autoplot()
+
+plot_knn %>%
+  ggplot() + geom_density(aes(x = .pred_1, fill = loan_status_level), alpha = 0.5)
+```
+
+
+### Improving Model Performance
+
+
+```{r}
+# knn tuning to chose the best K 
+knn_model <- nearest_neighbor(neighbors = tune()) %>%
+  set_engine("kknn") %>% 
+  set_mode("classification")
+
+knn_wflow <- workflow() %>%
+  add_recipe(samp_recipe_knn) %>%
+  add_model(knn_model)
+
+folds <- vfold_cv(training(samp_split), v = 10)
+
+knn_grid <- seq(5, 50, by = 2)
+
+knn_tune_resultes <- knn_wflow %>% 
+  tune_grid(resamples = folds, grid = knn_grid)
+
+#knn_tune_resultes %>%
+  #collect_metrics()
+
+knn_trees <- knn_tune_resultes %>%
+  select_best("accuracy")
+
+knn_trees
+
+knn_acc <- knn_wflow %>%
+  finalize_workflow(knn_trees) %>%
+  last_fit(samp_split) %>% 
+  collect_metrics()
+
+knn_acc
+```
+
+
+
+
+
+## Model 2: Boosted C5.0
+
+
+### Setup the Model
+
+
+```{r}
+mod_C50 <- boost_tree(trees = 100) %>% 
+  set_engine("C5.0") %>%
+  set_mode("classification") %>%
+  fit(loan_status_level ~ ., data = samp_training)
+
+mod_C50
+```
+
+
+### Evaluating Model Performance
+
+
+```{r}
+# prediction on testing data set
+pred_C50 <- mod_C50 %>%
+  predict(samp_testing) %>%
+  bind_cols(samp_testing)
+
+pred_C50 %>% 
+  conf_mat(truth = loan_status_level, estimate = .pred_class)
+
+pred_C50 %>% 
+  metrics(truth = loan_status_level, estimate = .pred_class)
+```
+
+
+```{r out.width="80%",fig.align='center'}
+# plot
+plot_C50 <- mod_C50 %>% 
+  predict(samp_testing, type = "prob") %>% 
+  bind_cols(samp_testing)
+
+plot_C50 %>% 
+  roc_auc(loan_status_level, .pred_0)
+
+plot_C50 %>% 
+  roc_curve(loan_status_level, .pred_0) %>% 
+  autoplot()
+
+plot_C50 %>% 
+  ggplot() + geom_density(aes(x = .pred_1, fill = loan_status_level), alpha = 0.5)
+```
+
+
+
+
+
+## Model 3: Random Forest
+
+
+### Setup the Model
+
+
+```{r}
+mod_ranger <- rand_forest(trees = 300) %>% 
+  set_engine("ranger") %>%
+  set_mode("classification") %>%
+  fit(loan_status_level ~ ., data = samp_training)
+
+mod_ranger
+```
+
+
+### Evaluating Model Performance
+
+
+```{r}
+# prediction on testing data set
+pred_ranger <- mod_ranger %>%
+  predict(samp_testing) %>%
+  bind_cols(samp_testing)
+
+pred_ranger %>% 
+  conf_mat(truth = loan_status_level, estimate = .pred_class)
+
+pred_ranger %>% 
+  metrics(truth = loan_status_level, estimate = .pred_class)
+```
+
+
+```{r out.width="80%",fig.align='center'}
+# plot
+plot_ranger <- mod_ranger %>% 
+  predict(samp_testing, type = "prob") %>% 
+  bind_cols(samp_testing)
+
+plot_ranger %>% 
+  roc_auc(loan_status_level, .pred_0)
+
+plot_ranger %>% 
+  roc_curve(loan_status_level, .pred_0) %>% 
+  autoplot()
+
+plot_ranger %>% 
+  ggplot() + geom_density(aes(x = .pred_1, fill = loan_status_level), alpha = 0.5)
+```
+
+
+### Improving Model Performance
+
+
+```{r}
+rf_model <- rand_forest(trees = tune()) %>% 
+  set_engine("ranger") %>%
+  set_mode("classification")
+
+rf_wflow <- workflow() %>%
+  add_recipe(samp_recipe) %>%
+  add_model(rf_model)
+
+folds <- vfold_cv(training(samp_split), v = 10)
+
+rf_grid <- expand.grid(trees = seq(50,800, by = 50))
+
+rf_tune_resultes <- rf_wflow %>%
+  tune_grid(resamples = folds, grid = rf_grid)
+
+#rf_tune_resultes %>%
+  #collect_metrics()
+
+rf_trees <- rf_tune_resultes %>%
+  select_best("accuracy")
+
+rf_trees
+  
+rf_acc <- rf_wflow %>%
+  finalize_workflow(rf_trees) %>%
+  last_fit(samp_split) %>% 
+  collect_metrics()
+
+rf_acc
+```
+
+
+
+
+
+## Model 4: Rpart
+
+
+### Setup the Model
+
+
+```{r}
+mod_rp <- decision_tree(cost_complexity = 0.001, tree_depth = 6) %>% 
+  set_engine("rpart") %>%
+  set_mode("classification") %>%
+  fit(loan_status_level ~ ., data = samp_training)
+
+mod_rp
+```
+
+
+### Evaluating Model Performance 
+
+
+```{r}
+# prediction on testing data set
+pred_rp <- mod_rp %>%
+  predict(samp_testing) %>%
+  bind_cols(samp_testing)
+
+pred_rp %>% 
+  conf_mat(truth = loan_status_level, estimate = .pred_class)
+
+pred_rp %>% 
+  metrics(truth = loan_status_level, estimate = .pred_class)
+```
+
+
+```{r out.width="80%",fig.align='center'}
+# plot
+plot_rp <- mod_rp %>% 
+  predict(samp_testing, type = "prob") %>% 
+  bind_cols(samp_testing)
+
+plot_rp %>% 
+  roc_auc(loan_status_level, .pred_0)
+
+plot_rp %>% 
+  roc_curve(loan_status_level, .pred_0) %>% 
+  autoplot()
+
+plot_rp %>% 
+  ggplot() + geom_density(aes(x = .pred_1, fill = loan_status_level), alpha = 0.5)
+```
+
+
+### Improving Model Performance
+
+
+```{r}
+rp_model <- decision_tree(cost_complexity = tune(), tree_depth = tune()) %>% 
+  set_engine("rpart") %>%
+  set_mode("classification")
+
+rp_wflow <- workflow() %>%
+  add_recipe(samp_recipe) %>%
+  add_model(rp_model)
+
+folds <- vfold_cv(training(samp_split), v = 10)
+
+rp_grid <- grid_regular(cost_complexity(), tree_depth(), levels = 5)
+
+rp_tune_resultes <- rp_wflow %>%
+  tune_grid(resamples = folds, grid = rp_grid)
+
+#rp_tune_resultes %>%
+  #collect_metrics()
+
+rp_trees <- rp_tune_resultes %>%
+  select_best("accuracy")
+
+rp_trees
+
+rp_acc <- rp_wflow %>%
+  finalize_workflow(rp_trees) %>%
+  last_fit(samp_split) %>% 
+  collect_metrics()
+
+rp_acc  
+```
+
+
+
+
+
+## Model 5: XGBoost
+
+
+### Setup the Model
+
+
+```{r,message=FALSE, warning=FALSE}
+mod_xgb <- boost_tree(trees = 300) %>% 
+  set_engine("xgboost") %>%
+  set_mode("classification") %>%
+  fit(loan_status_level ~ ., data = samp_training)
+
+# mod_xgb
+```
+
+
+### Evaluating Model Performance 
+
+
+```{r}
+# prediction on testing data set
+pred_xgb <- mod_xgb %>%
+  predict(samp_testing) %>%
+  bind_cols(samp_testing)
+
+pred_xgb %>% 
+  conf_mat(truth = loan_status_level, estimate = .pred_class)
+
+pred_xgb %>% 
+  metrics(truth = loan_status_level, estimate = .pred_class)
+```
+
+
+```{r out.width="80%",fig.align='center'}
+# plot
+plot_xgb <- mod_xgb %>% 
+  predict(samp_testing, type = "prob") %>% 
+  bind_cols(samp_testing)
+
+plot_xgb %>% 
+  roc_auc(loan_status_level, .pred_0)
+
+plot_xgb %>% 
+  roc_curve(loan_status_level, .pred_0) %>% 
+  autoplot()
+
+plot_xgb %>% 
+  ggplot() + geom_density(aes(x = .pred_1, fill = loan_status_level), alpha = 0.5)
+```
+
+
+
+
+
+## Model 6: Logistic Regression using Regularization
+
+
+### Setup the Model
+
+
+```{r,message=FALSE,warning=FALSE}
+mod_glm <- logistic_reg(penalty = 0.001, mixture = 0.5) %>% 
+  set_engine("glmnet") %>%
+  set_mode("classification") %>%
+  fit(loan_status_level ~ ., data = samp_training)
+
+tidy(mod_glm)
+```
+
+
+### Evaluating Model Performance 
+
+
+```{r}
+# prediction on testing data set
+pred_glm <- mod_glm %>%
+  predict(samp_testing) %>%
+  bind_cols(samp_testing)
+
+pred_glm %>% 
+  conf_mat(truth = loan_status_level, estimate = .pred_class)
+
+pred_glm %>% 
+  metrics(truth = loan_status_level, estimate = .pred_class)
+```
+
+
+```{r out.width="80%",fig.align='center'}
+# plot
+plot_glm <- mod_glm %>% 
+  predict(samp_testing, type = "prob") %>% 
+  bind_cols(samp_testing)
+
+plot_glm %>% 
+  roc_auc(loan_status_level, .pred_0)
+
+plot_glm %>% 
+  roc_curve(loan_status_level, .pred_0) %>% 
+  autoplot()
+
+plot_glm %>% 
+  ggplot() + geom_density(aes(x = .pred_1, fill = loan_status_level), alpha = 0.5)
+```
+
+
+
+
+
+## Model 7: Naive Bayes
+
+
+### Setup the Model
+
+
+```{r}
+mod_nb <- naive_Bayes(Laplace = 1) %>% 
+  set_engine("klaR") %>%
+  set_mode("classification") %>%
+  fit(loan_status_level ~ ., data = samp_training)
+
+# mod_nb
+```
+
+
+### Evaluating Model Performance 
+
+
+```{r,message=FALSE,warning=FALSE}
+# prediction on testing data set
+pred_nb <- mod_nb %>%
+  predict(samp_testing) %>%
+  bind_cols(samp_testing)
+
+pred_nb %>% 
+  conf_mat(truth = loan_status_level, estimate = .pred_class)
+
+pred_nb %>% 
+  metrics(truth = loan_status_level, estimate = .pred_class)
+```
+
+
+```{r,message=FALSE,warning=FALSE,out.width="80%",fig.align='center'}
+# plot
+plot_nb <- mod_nb %>% 
+  predict(samp_testing, type = "prob") %>% 
+  bind_cols(samp_testing)
+
+plot_nb %>% 
+  roc_auc(loan_status_level, .pred_0)
+
+plot_nb %>% 
+  roc_curve(loan_status_level, .pred_0) %>% 
+  autoplot()
+
+plot_nb %>% 
+  ggplot() + geom_density(aes(x = .pred_1, fill = loan_status_level), alpha = 0.5)
+```
+
+
+
+
+\clearpage
+
+
+
+## Conclusion
+
+
+Since the data set contains some nominal predictors (categorical variables), we can't improve some models' performance, which means some errors exist when processing tuning, such as Boosted C50 and XGBoost. Our tuning improves a little bit on some models' performance.
+
+
+The following table shows the statistic of accuracy and AUC for all models:
+
+
+```{r,echo=FALSE}
+# comparison accuracy
+pred_null %>% metrics(truth = loan_status_level, estimate = .pred_class) %>%
+  bind_rows(
+    pred_knn %>% metrics(truth = loan_status_level, estimate = .pred_class),
+    pred_C50 %>% metrics(truth = loan_status_level, estimate = .pred_class),
+    pred_ranger %>% metrics(truth = loan_status_level, estimate = .pred_class),
+    pred_rp %>% metrics(truth = loan_status_level, estimate = .pred_class),
+    pred_xgb %>% metrics(truth = loan_status_level, estimate = .pred_class),
+    pred_glm %>% metrics(truth = loan_status_level, estimate = .pred_class),
+    pred_nb %>% metrics(truth = loan_status_level, estimate = .pred_class)
+    ) %>% 
+  mutate(model = rep(c("Null", "kNN", "Boosted C50", "Random Forest", 
+                       "Rpart", "XGBoost","glm", "Naive Bayes"), each = 2))%>% 
+  spread(.metric, .estimate) %>% 
+  arrange(desc(accuracy)) %>%
+  kable()
+```
+
+
+```{r,echo=FALSE}
+# auc comparison
+plot_null %>% roc_auc(loan_status_level, .pred_0) %>%
+  bind_rows(
+    plot_knn %>% roc_auc(loan_status_level, .pred_0),
+    plot_C50 %>% roc_auc(loan_status_level, .pred_0),
+    plot_ranger %>% roc_auc(loan_status_level, .pred_0),
+    plot_rp %>% roc_auc(loan_status_level, .pred_0),
+    plot_xgb %>% roc_auc(loan_status_level, .pred_0),
+    plot_glm %>% roc_auc(loan_status_level, .pred_0),
+    plot_nb %>% roc_auc(loan_status_level, .pred_0)
+    ) %>% 
+  mutate(model = c("Null", "kNN", "Boosted C50", "Random Forest", 
+                       "Rpart", "XGBoost","glm", "Naive Bayes")) %>%
+  arrange(desc(.estimate)) %>%
+  kable()
+```
+
+
+Among these 8 models, xgboost model has the greatest statistic of accuracy, kappa and AUC. Its confusion matrix shows the number of true positives is 8444 and number of true negatives is 2103, where as the number of false negatives is 3 and number of false positives is 45. This is the best confusion matrix compared with other models. 
+
+As a result, in this case, we would select xgboost model is the best ML learning model is for classifying *Loan Status*.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

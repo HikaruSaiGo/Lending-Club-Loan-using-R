@@ -1,0 +1,259 @@
+---
+title: "Project Introduction & Data"
+author: ""
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  pdf_document: 
+    latex_engine: xelatex
+  html_notebook: default
+---
+
+
+## Abstract
+
+
+Lending Club was founded in 2006 as a peer-to-peer lending company that allows individual investor lenders to lend to other individual borrowers through an online platform. It services people that need personal loans between $1,000 and $40,000. The Lending Club data set represents thousands of loans made through the Lending Club platform. 
+
+
+The goal of this exploratory analysis is to apply most Machine Learning Algorithms we learn about in Stat 652 to the data from 2012-2014. Then compute the accuracy for each model to classify the Loan Status of the approved Lending Club loans, and select the best ML learning model for classifying *Loan Status*.
+
+
+## Introduction
+
+
+```{r,include=FALSE}
+library(pacman)
+p_load(tictoc, tidyverse, data.table, knitr)
+
+tic()
+data <- 
+  fread("C:/Users/accepted_2007_to_2018Q4.csv", 
+              nThread = 12, na.strings = "")
+toc()
+
+club <- data %>% filter(str_detect(issue_d, '2012|2013|2014'))
+```
+
+
+Our target data is from year 2012 to 2014, which contains 423810 observations and 151 variables. 112 of them are numeric variables and 38 of them are character features. Among those character features, there are 34 categorical variables.
+
+
+```{r,echo=FALSE}
+Rows <- nrow(club)
+Columns <- ncol(club)
+
+
+numeric.vars <- club %>%
+  select_if(is.numeric) %>%
+  names()
+
+numeric <- length(numeric.vars)
+
+character <- club %>%
+  select_if(is.character) %>%
+  length()
+
+
+club_0 <- club %>%
+  select(-id, -member_id, -url, -desc, -zip_code)
+
+categorical.vars <- club_0 %>%
+  select_if(is.character) %>%
+  names()
+
+categorical <- length(categorical.vars)
+
+data.frame(Rows, Columns, numeric, character, categorical) %>% kable()
+
+categorical.vars[35:112] = c("")
+
+data.frame(numeric.vars, categorical.vars) %>% kable()
+```
+
+
+*Loan_status* is our target response variables; it has 7 levels as the following shown:
+
+
+```{r,echo=FALSE}
+club %>%
+  group_by(loan_status) %>%
+  tally() %>% 
+  mutate(freq = round(n/sum(n),4)) %>%
+  kable()
+```
+
+
+It appears that 340,444 borrowers have fully paid the loan, which is 80% of the total borrowers.
+
+
+To begin this exploratory analysis on the data and improve on the models' accuracy of predictions, we need to clean data first.
+
+
+## Data Cleaning and Wrangling
+
+
+```{r,message=FALSE,warning=FALSE}
+library(pacman)
+p_load(tictoc, tidyverse, data.table, tidymodels, yardstick, janitor, naniar, discrim, gmodels, knitr)
+```
+
+
+We load the large data set and subset the data for the year from 2012 to 2014 at the beginning.
+
+
+```{r}
+tic()
+data <- 
+  fread("C:/Users/accepted_2007_to_2018Q4.csv", 
+              nThread = 12, na.strings = "")
+toc()
+```
+
+
+```{r}
+# subset the data for the years 2012-2014
+club <- data %>%
+  filter(str_detect(issue_d, '2012|2013|2014'))
+```
+
+
+We need to check if the data set contains any duplicate records and the situation of missing values before starting.
+
+
+```{r}
+# check duplicate data
+get_dupes(club)
+```
+
+
+```{r out.width="80%", fig.align='center'}
+# check missing value
+gg_miss_var(club[,1:75], show_pct = TRUE)
+gg_miss_var(club[,76:151], show_pct = TRUE)
+```
+
+
+Because there are many missing values, we plan to remove those variables whose proportion of missing values is greater than 0.5.
+
+
+```{r}
+# calculate the proportion of missing value for each variables and select which rate > 0.5
+var_df <- club %>% 
+  map_df(~ sum(is.na(.))/length(.)) %>% 
+  select_if(~ . > 0.5) %>%
+  gather() 
+
+var_na <- club %>% 
+  map_df(~ sum(is.na(.))/length(.)) %>% 
+  select_if(~ . > 0.5) %>%
+  names()
+```
+
+
+We build a classifier to *Loan_status*. We divided it to 2 levels for classification: *Fully Paid* and *Not Fully Paid*, and denote them as *"1"* and *"0"*, respectively.
+
+
+```{r}
+# select character variables and convert them to factor variables
+#club %>% 
+  #select_if(is.character) %>% 
+  #map_df(~ as.factor(.))
+
+
+club_df <- club %>%
+  select(!one_of(var_na)) %>%                                # remove most missing value variables
+  select(-id, -issue_d, -url, -zip_code, -policy_code, -application_type, -title, -emp_title, 
+         -earliest_cr_line, -last_credit_pull_d, -verification_status, -last_pymnt_d, -addr_state, 
+         -emp_length, -purpose) %>% 
+  mutate_if(is.character, as.factor) %>%                   # convert character vars to factor vars
+  mutate(loan_status_level = ifelse(loan_status == "Fully Paid", 1,  0)) %>%      # classification
+  mutate(loan_status_level = as.factor(loan_status_level))
+
+str(club_df)
+```
+
+
+Here is the summary of classification for the variable *loan_status*:
+
+
+```{r}
+# check loan status level
+club_df %>%
+  group_by(loan_status, loan_status_level) %>%
+  tally()
+```
+
+
+```{r}
+CrossTable(club_df$loan_status_level, prop.chisq = FALSE)
+```
+
+
+Because the data set for year 2012-2014 is pretty huge, we take some sample that is 10% of data set for modeling. 
+
+
+```{r}
+# sample 10% of data set
+set.seed(999)
+club_samp <- club_df %>% 
+  slice_sample(n = 0.1*nrow(club))
+```
+
+
+And the following is the summary of classification for the variable *loan_status* in our overall data set.
+
+
+```{r}
+#summarize the y-variable
+CrossTable(club_samp$loan_status_level, prop.chisq = FALSE)
+```
+
+
+We use a 75-25 split to create Training and Testing data sets.
+ 
+
+```{r}
+# split the training and testing dataset
+set.seed(999)
+samp_split <- club_samp %>% 
+  initial_split(prop = 0.75)
+
+samp_split
+```
+
+
+We use *recipe* function to clean up and process our final data.
+
+
+```{r}
+samp_recipe <- training(samp_split) %>% 
+  recipe(loan_status_level ~ .) %>% 
+  step_rm(loan_status) %>%
+  step_nzv(all_predictors()) %>%
+  step_knnimpute(all_predictors()) %>%
+  prep()
+
+summary(samp_recipe)
+
+tidy(samp_recipe)
+```
+
+
+```{r}
+samp_testing <- samp_recipe %>%
+  bake(testing(samp_split))
+
+samp_testing
+```
+
+
+```{r}
+samp_training <- juice(samp_recipe)
+
+samp_training
+```
+
+
+After finishing all these steps, we start to training some models on the data.
+
+

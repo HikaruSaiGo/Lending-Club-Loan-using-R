@@ -1,0 +1,263 @@
+---
+title: "Extra Credit"
+author: ""
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+
+
+\clearpage
+
+
+## Extra Credit
+
+
+```{r,include=FALSE}
+library(pacman)
+p_load(tictoc, tidyverse, data.table, tidymodels, yardstick, janitor, naniar, discrim, gmodels, knitr)
+
+library(doParallel)
+registerDoParallel(cores = 12)
+```
+
+
+```{r,include=FALSE}
+tic()
+data <- 
+  fread("C:/Users/accepted_2007_to_2018Q4.csv", 
+              nThread = 12, na.strings = "")
+data
+toc()
+
+# subset the data for the years 2012-2014
+club <- data %>%
+  filter(str_detect(issue_d, '2012|2013|2014'))
+
+var_df <- club %>% 
+  map_df(~ sum(is.na(.))/length(.)) %>% 
+  select_if(~ . > 0.5) %>%
+  gather() 
+
+var_na <- club %>% 
+  map_df(~ sum(is.na(.))/length(.)) %>% 
+  select_if(~ . > 0.5) %>%
+  names()
+
+var_na
+
+club_df <- club %>%
+  select(!one_of(var_na)) %>%                                # remove most missing value variables
+  select(-id, -issue_d, -url, -zip_code, -policy_code, -application_type, -title, -emp_title, 
+         -earliest_cr_line, -last_credit_pull_d, -verification_status, -last_pymnt_d, -addr_state, 
+         -emp_length, -purpose) %>% 
+  mutate_if(is.character, as.factor) %>%                   # convert character vars to factor vars
+  mutate(loan_status_level = ifelse(loan_status == "Fully Paid", 1,  0)) %>%      # classification
+  mutate(loan_status_level = as.factor(loan_status_level))
+```
+
+
+Subset the data for the years 2015.
+
+
+```{r}
+# subset the data for the years 2015
+club_2015 <- data %>%
+  filter(str_detect(issue_d, '2015'))
+
+# club_2015
+```
+
+
+Check if the data set contains any duplicate records.
+
+
+```{r}
+# check duplicate data
+get_dupes(club_2015)
+```
+
+
+Select the variables which are the same as those in data from year 2012-2014.
+
+
+```{r}
+var_2014 <- club_df %>% 
+  names()
+
+club_df_2015 <- club_2015 %>%
+  mutate_if(is.character, as.factor) %>%         # convert character vars to factor vars
+  mutate(loan_status_level = ifelse(loan_status == "Fully Paid", 1,  0)) %>%   # classification
+  mutate(loan_status_level = as.factor(loan_status_level)) %>%
+  select(one_of(var_2014))
+
+# head(club_df_2015)
+```
+
+
+Check missing values.
+
+
+```{r}
+# check missing value
+gg_miss_var(club_df_2015, show_pct = TRUE)
+```
+
+
+Summary of classification for the variable *loan_status*.
+
+
+```{r}
+# check loan status level
+club_df_2015 %>%
+  group_by(loan_status, loan_status_level) %>%
+  tally()
+```
+
+
+```{r}
+CrossTable(club_df_2015$loan_status_level, prop.chisq = FALSE)
+```
+
+
+Sample 10% of data set for testing 
+
+
+```{r}
+# sample 10% of data set
+set.seed(999)
+club_samp_2015 <- club_df_2015 %>% 
+  slice_sample(n = 0.1*nrow(club_2015))
+```
+
+
+Summary of classification for the variable *loan_status*.
+
+
+```{r}
+#summarize the y-variable
+CrossTable(club_samp_2015$loan_status_level, prop.chisq = FALSE)
+```
+
+
+Because there are different levels in *home_ownership* between 2 data sets, we need to drop levels in order to make 2 data sets correspond.
+
+
+```{r}
+levels(club_df$home_ownership)
+levels(club_samp_2015$home_ownership)
+```
+
+
+```{r}
+club_re <- club_df %>%
+  mutate(home_ownership = as.character(home_ownership)) %>%
+  filter(home_ownership == "ANY" | home_ownership == "MORTGAGE" | 
+         home_ownership == "OWN" | home_ownership == "RENT") %>%
+  mutate_if(is.character, as.factor)
+
+levels(club_re$home_ownership)
+```
+
+
+Create Training nad Testing data set.
+
+
+```{r}
+set.seed(999)
+club_samp <- club_re %>% 
+  slice_sample(n = 0.1*nrow(club))
+```
+
+
+```{r}
+set.seed(999)
+samp_split <- club_samp %>% 
+  initial_split(prop = 0.75)
+
+
+samp_recipe <- training(samp_split) %>% 
+  recipe(loan_status_level ~ .) %>% 
+  step_rm(loan_status) %>%
+  step_nzv(all_predictors()) %>%
+  step_knnimpute(all_predictors()) %>%
+  prep()
+
+summary(samp_recipe)
+
+tidy(samp_recipe)
+
+
+samp_testing_2015 <- samp_recipe %>%
+  bake(club_samp_2015)
+
+samp_testing_2015
+
+
+samp_training <- juice(samp_recipe)
+
+samp_training
+```
+
+
+
+
+
+### Model: XGBoost
+
+
+#### Setup the Model
+
+
+```{r,message=FALSE, warning=FALSE}
+mod_xgb_2015 <- boost_tree(trees = 300) %>% 
+  set_engine("xgboost") %>%
+  set_mode("classification") %>%
+  fit(loan_status_level ~ ., data = samp_training)
+
+# mod_xgb_2015
+```
+
+
+#### Evaluating Model Performance 
+
+
+```{r out.width="85%",fig.align="center"}
+# plot
+plot_xgb_2015 <- mod_xgb_2015 %>% 
+  predict(samp_testing_2015, type = "prob") %>% 
+  bind_cols(samp_testing_2015)
+
+plot_xgb_2015 %>% 
+  roc_curve(loan_status_level, .pred_0) %>% 
+  autoplot()
+
+plot_xgb_2015 %>% 
+  ggplot() + geom_density(aes(x = .pred_1, fill = loan_status_level), alpha = 0.5)
+```
+
+
+
+```{r}
+# prediction on testing data set
+pred_xgb_2015 <- mod_xgb_2015 %>%
+  predict(samp_testing_2015) %>%
+  bind_cols(samp_testing_2015)
+
+pred_xgb_2015 %>% 
+  conf_mat(truth = loan_status_level, estimate = .pred_class)
+
+pred_xgb_2015 %>% 
+  metrics(truth = loan_status_level, estimate = .pred_class)
+
+
+plot_xgb_2015 %>% 
+  roc_auc(loan_status_level, .pred_0)
+```
+
+
+
+
+
